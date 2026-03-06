@@ -214,7 +214,7 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 		if rangeRequest != nil {
 			rng, err = rangeRequest.Range(obj.Size)
 			if err != nil {
-				sd.Close()
+				_ = sd.Close()
 				return nil, err
 			}
 			if rng != nil {
@@ -222,7 +222,7 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 				// The entire prefix (up to rng.Start bytes) must be downloaded
 				// and decrypted; seeking is not possible with stream decryption.
 				if _, err := io.CopyN(io.Discard, sd, rng.Start); err != nil && err != io.EOF {
-					sd.Close()
+					_ = sd.Close()
 					return nil, fmt.Errorf("skip to range start: %w", err)
 				}
 				contents = &closerWithReader{sd, io.LimitReader(sd, rng.Length)}
@@ -305,8 +305,8 @@ func (b *Backend) PutObject(bucketName, key string, meta map[string]string, inpu
 	if err != nil {
 		return gofakes3.PutObjectResult{}, fmt.Errorf("create temp: %w", err)
 	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
+	defer os.Remove(tmp.Name())  //nolint:errcheck
+	defer tmp.Close()            //nolint:errcheck
 
 	h := md5.New()
 	w := io.MultiWriter(tmp, h)
@@ -450,8 +450,8 @@ func (b *Backend) renewObject(obj db.Object) error {
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
+	defer os.Remove(tmp.Name())  //nolint:errcheck
+	defer tmp.Close()            //nolint:errcheck
 
 	if err := b.gf.Download(obj.GigafileDomain, obj.FileID, tmp, ""); err != nil {
 		return fmt.Errorf("download for renewal: %w", err)

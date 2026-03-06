@@ -72,13 +72,13 @@ func (b *Backend) UploadPart(bucket, object string, id gofakes3.UploadID, partNu
 	h := md5.New()
 	n, err := io.Copy(io.MultiWriter(tmp, h), input)
 	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return "", fmt.Errorf("write part: %w", err)
 	}
 	if contentLength >= 0 && n != contentLength {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return "", gofakes3.ErrIncompleteBody
 	}
 
@@ -88,8 +88,8 @@ func (b *Backend) UploadPart(bucket, object string, id gofakes3.UploadID, partNu
 	defer mpu.mu.Unlock()
 	// Replace any previously uploaded part with the same number.
 	if old, exists := mpu.parts[partNumber]; exists {
-		old.file.Close()
-		os.Remove(old.file.Name())
+		_ = old.file.Close()
+		_ = os.Remove(old.file.Name())
 	}
 	mpu.parts[partNumber] = &mpPart{
 		file:         tmp,
@@ -324,7 +324,7 @@ func (b *Backend) cleanupUpload(mpu *mpUpload) {
 	mpu.mu.Lock()
 	defer mpu.mu.Unlock()
 	for _, p := range mpu.parts {
-		p.file.Close()
-		os.Remove(p.file.Name())
+		_ = p.file.Close()
+		_ = os.Remove(p.file.Name())
 	}
 }

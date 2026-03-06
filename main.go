@@ -30,7 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
-	defer database.Close()
+	defer database.Close() //nolint:errcheck
 
 	be := backend.New(database, cfg.TempDir, cfg.EncryptionKey)
 	if cfg.EncryptionKey != nil {

@@ -76,7 +76,7 @@ func (c *Client) DeleteFile(domain, fileID, delKey string) error {
 	if err != nil {
 		return fmt.Errorf("remove.php: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var result struct {
 		Status int `json:"status"`
@@ -122,7 +122,7 @@ func (c *Client) fetchServer() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("fetch server: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read server page: %w", err)
@@ -196,7 +196,7 @@ func (c *Client) uploadChunk(server, token, filename string, chunkNo, totalChunk
 
 	// file part with explicit content-type
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="blob"`))
+	h.Set("Content-Disposition", `form-data; name="file"; filename="blob"`)
 	h.Set("Content-Type", "application/octet-stream")
 	fw, err := w.CreatePart(h)
 	if err != nil {
@@ -205,7 +205,7 @@ func (c *Client) uploadChunk(server, token, filename string, chunkNo, totalChunk
 	if _, err := fw.Write(data); err != nil {
 		return nil, err
 	}
-	w.Close()
+	_ = w.Close()
 
 	url := fmt.Sprintf("https://%s/upload_chunk.php", server)
 	req, err := http.NewRequest(http.MethodPost, url, body)
@@ -218,7 +218,7 @@ func (c *Client) uploadChunk(server, token, filename string, chunkNo, totalChunk
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	var cr chunkResponse
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
@@ -271,7 +271,7 @@ func (c *Client) Download(domain, fileID string, w io.Writer, rangeHeader string
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)

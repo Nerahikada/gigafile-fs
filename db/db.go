@@ -38,7 +38,7 @@ func Open(path string) (*DB, error) {
 	conn.SetMaxOpenConns(1) // sqlite doesn't support concurrent writes
 	d := &DB{conn: conn}
 	if err := d.migrate(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	return d, nil
@@ -108,7 +108,7 @@ func (d *DB) ListBuckets() ([]Bucket, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var buckets []Bucket
 	for rows.Next() {
 		var b Bucket
@@ -182,7 +182,7 @@ func (d *DB) List(bucket, prefix string) ([]Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var objects []Object
 	for rows.Next() {
@@ -209,7 +209,7 @@ func (d *DB) ListExpiringSoon(within time.Duration) ([]Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var objects []Object
 	for rows.Next() {
