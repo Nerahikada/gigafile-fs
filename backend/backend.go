@@ -320,7 +320,15 @@ func (b *Backend) DeleteObject(bucketName, objectName string) (gofakes3.ObjectDe
 	if !ok {
 		return gofakes3.ObjectDeleteResult{}, gofakes3.BucketNotFound(bucketName)
 	}
-	// Soft delete; gigafile.nu has no delete API
+	obj, err := b.db.Get(bucketName, objectName)
+	if err != nil {
+		return gofakes3.ObjectDeleteResult{}, err
+	}
+	if obj != nil && obj.DelKey != "" {
+		if err := b.gf.DeleteFile(obj.GigafileDomain, obj.FileID, obj.DelKey); err != nil {
+			log.Printf("DELETE %s/%s: gigafile remove failed (file may remain on server): %v", bucketName, objectName, err)
+		}
+	}
 	_ = b.db.SoftDelete(bucketName, objectName)
 	return gofakes3.ObjectDeleteResult{}, nil
 }
@@ -330,6 +338,20 @@ func (b *Backend) DeleteObject(bucketName, objectName string) (gofakes3.ObjectDe
 func (b *Backend) DeleteMulti(bucketName string, objects ...string) (gofakes3.MultiDeleteResult, error) {
 	var result gofakes3.MultiDeleteResult
 	for _, key := range objects {
+		obj, err := b.db.Get(bucketName, key)
+		if err != nil {
+			result.Error = append(result.Error, gofakes3.ErrorResult{
+				Key:     key,
+				Code:    "InternalError",
+				Message: err.Error(),
+			})
+			continue
+		}
+		if obj != nil && obj.DelKey != "" {
+			if err := b.gf.DeleteFile(obj.GigafileDomain, obj.FileID, obj.DelKey); err != nil {
+				log.Printf("DELETE %s/%s: gigafile remove failed (file may remain on server): %v", bucketName, key, err)
+			}
+		}
 		if err := b.db.SoftDelete(bucketName, key); err != nil {
 			result.Error = append(result.Error, gofakes3.ErrorResult{
 				Key:     key,
@@ -391,7 +413,7 @@ func (b *Backend) renewObject(obj db.Object) error {
 
 	// Update metadata
 	now := time.Now()
-	return b.db.Put(db.Object{
+	if err := b.db.Put(db.Object{
 		Bucket:         obj.Bucket,
 		Key:            obj.Key,
 		GigafileURL:    result.URL,
@@ -403,7 +425,17 @@ func (b *Backend) renewObject(obj db.Object) error {
 		Size:           obj.Size,
 		ContentType:    obj.ContentType,
 		ETag:           obj.ETag,
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Delete the old file from gigafile.nu now that the new one is recorded
+	if obj.DelKey != "" {
+		if err := b.gf.DeleteFile(obj.GigafileDomain, obj.FileID, obj.DelKey); err != nil {
+			log.Printf("renewal: delete old file %s: %v", obj.FileID, err)
+		}
+	}
+	return nil
 }
 
 // EnsureBucket creates a bucket if it doesn't already exist (idempotent).

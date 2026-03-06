@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	lifetime     = "100" // maximum retention days
+	lifetime     = 100               // maximum retention days (valid: 3,5,7,14,30,60,100)
 	chunkSize    = 100 * 1024 * 1024 // 100 MB per chunk
 	gigafileHome = "https://gigafile.nu/"
 )
@@ -177,7 +177,7 @@ func (c *Client) uploadChunk(server, token, filename string, chunkNo, totalChunk
 	_ = w.WriteField("name", filename)
 	_ = w.WriteField("chunk", strconv.Itoa(chunkNo))
 	_ = w.WriteField("chunks", strconv.Itoa(totalChunks))
-	_ = w.WriteField("lifetime", lifetime)
+	_ = w.WriteField("lifetime", strconv.Itoa(lifetime))
 
 	// file part with explicit content-type
 	h := make(textproto.MIMEHeader)
