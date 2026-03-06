@@ -219,8 +219,8 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 			}
 			if rng != nil {
 				// Skip leading plaintext to reach the range start.
-				// Since the stream is sequential we read and discard; the
-				// chunk boundary alignment makes this at most one extra chunk.
+				// The entire prefix (up to rng.Start bytes) must be downloaded
+				// and decrypted; seeking is not possible with stream decryption.
 				if _, err := io.CopyN(io.Discard, sd, rng.Start); err != nil && err != io.EOF {
 					sd.Close()
 					return nil, fmt.Errorf("skip to range start: %w", err)
