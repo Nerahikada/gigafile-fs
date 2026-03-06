@@ -328,19 +328,17 @@ func (b *Backend) PutObject(bucketName, key string, meta map[string]string, inpu
 		contentType = ct
 	}
 
-	// uploadReader is what we actually send to gigafile.nu.
-	// With encryption it is the ciphertext temp file; without it is the plaintext temp file.
-	uploadReader := io.ReadSeeker(tmp)
+	// Determine what to upload: encrypt on-the-fly (no ciphertext temp file needed)
+	// or pass the plaintext temp file through directly.
+	var uploadReader io.Reader = tmp
 	uploadSize := size
 	if b.encKey != nil {
-		encTmp, encSize, err := encryptToFile(b.encKey, tmp, b.tempDir)
+		se, err := newStreamEncryptor(b.encKey, tmp)
 		if err != nil {
 			return gofakes3.PutObjectResult{}, fmt.Errorf("encrypt: %w", err)
 		}
-		defer os.Remove(encTmp.Name())
-		defer encTmp.Close()
-		uploadReader = encTmp
-		uploadSize = encSize
+		uploadReader = se
+		uploadSize = calcCiphertextSize(size)
 	}
 
 	result, err := b.gf.Upload(key, uploadSize, uploadReader)

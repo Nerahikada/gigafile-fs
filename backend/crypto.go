@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"os"
 )
 
 // Encrypted file format:
@@ -29,76 +28,79 @@ const (
 	encHeaderSize = 4 + 1 + 4 // magic + version + chunk_size
 )
 
-// encryptToFile reads plaintext from r and writes the encrypted file format to
-// a new temp file. Returns the temp file (seeked to start) and its size.
-// Caller must close and remove the file.
-func encryptToFile(key []byte, r io.Reader, tempDir string) (*os.File, int64, error) {
+// calcCiphertextSize returns the encrypted byte count for a given plaintext size.
+// Formula: header + numChunks × (nonce + tag) + plaintextSize
+func calcCiphertextSize(plaintextSize int64) int64 {
+	numChunks := (plaintextSize + int64(encChunkSize) - 1) / int64(encChunkSize)
+	return int64(encHeaderSize) + numChunks*int64(gcmNonceSize+gcmTagSize) + plaintextSize
+}
+
+// streamEncryptor is an io.Reader that encrypts plaintext from src on the fly,
+// producing the GFSE chunked format without buffering the entire file.
+// Zero-allocation per chunk: nonce and ciphertext reuse pre-allocated slices.
+type streamEncryptor struct {
+	gcm        cipher.AEAD
+	src        io.Reader
+	nonce      [gcmNonceSize]byte
+	plainBuf   []byte // scratch buffer for reading one plaintext chunk
+	pendingBuf []byte // scratch buffer for nonce + ciphertext + tag
+	pending    []byte // unread portion of pendingBuf (or header)
+	header     [encHeaderSize]byte
+	done       bool
+}
+
+// newStreamEncryptor returns a streaming encryptor whose first Read emits the
+// GFSE header followed by encrypted chunks read from src.
+func newStreamEncryptor(key []byte, src io.Reader) (*streamEncryptor, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, 0, fmt.Errorf("aes: %w", err)
+		return nil, fmt.Errorf("aes: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, 0, fmt.Errorf("gcm: %w", err)
+		return nil, fmt.Errorf("gcm: %w", err)
 	}
-
-	tmp, err := os.CreateTemp(tempDir, "gigafile-enc-*")
-	if err != nil {
-		return nil, 0, fmt.Errorf("create encrypted temp: %w", err)
+	se := &streamEncryptor{
+		gcm:        gcm,
+		src:        src,
+		plainBuf:   make([]byte, encChunkSize),
+		pendingBuf: make([]byte, gcmNonceSize+encChunkSize+gcmTagSize),
 	}
+	copy(se.header[:4], encMagic[:])
+	se.header[4] = encVersion
+	binary.BigEndian.PutUint32(se.header[5:9], encChunkSize)
+	se.pending = se.header[:] // emit header on first Read
+	return se, nil
+}
 
-	// Write header
-	var header [encHeaderSize]byte
-	copy(header[:4], encMagic[:])
-	header[4] = encVersion
-	binary.BigEndian.PutUint32(header[5:9], encChunkSize)
-	if _, err := tmp.Write(header[:]); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, 0, err
-	}
-
-	buf := make([]byte, encChunkSize)
-	nonce := make([]byte, gcmNonceSize)
-	var written int64 = encHeaderSize
-
+func (e *streamEncryptor) Read(p []byte) (int, error) {
 	for {
-		n, readErr := io.ReadFull(r, buf)
-		if n > 0 {
-			if _, err := rand.Read(nonce); err != nil {
-				tmp.Close()
-				os.Remove(tmp.Name())
-				return nil, 0, fmt.Errorf("rand nonce: %w", err)
-			}
-			if _, err := tmp.Write(nonce); err != nil {
-				tmp.Close()
-				os.Remove(tmp.Name())
-				return nil, 0, err
-			}
-			ct := gcm.Seal(nil, nonce, buf[:n], nil)
-			if _, err := tmp.Write(ct); err != nil {
-				tmp.Close()
-				os.Remove(tmp.Name())
-				return nil, 0, err
-			}
-			written += int64(gcmNonceSize + len(ct))
+		if len(e.pending) > 0 {
+			n := copy(p, e.pending)
+			e.pending = e.pending[n:]
+			return n, nil
 		}
+		if e.done {
+			return 0, io.EOF
+		}
+		n, readErr := io.ReadFull(e.src, e.plainBuf)
+		if n == 0 {
+			e.done = true
+			return 0, io.EOF
+		}
+		if _, err := rand.Read(e.nonce[:]); err != nil {
+			return 0, fmt.Errorf("rand nonce: %w", err)
+		}
+		copy(e.pendingBuf[:gcmNonceSize], e.nonce[:])
+		// Seal appends ciphertext+tag into pendingBuf[gcmNonceSize:], reusing the allocation.
+		sealed := e.gcm.Seal(e.pendingBuf[gcmNonceSize:gcmNonceSize], e.nonce[:], e.plainBuf[:n], nil)
+		e.pending = e.pendingBuf[:gcmNonceSize+len(sealed)]
 		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-		if readErr != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, 0, fmt.Errorf("read plaintext: %w", readErr)
+			e.done = true
+		} else if readErr != nil {
+			return 0, fmt.Errorf("read plaintext: %w", readErr)
 		}
 	}
-
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, 0, err
-	}
-	return tmp, written, nil
 }
 
 // streamDecryptor decrypts an AES-256-GCM chunked ciphertext stream on the fly.

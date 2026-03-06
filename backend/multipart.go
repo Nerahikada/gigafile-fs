@@ -271,21 +271,20 @@ func (b *Backend) CompleteMultipartUpload(bucket, object string, id gofakes3.Upl
 	// With encryption the plaintext must be fully assembled first so it can be
 	// encrypted chunk-by-chunk before upload. Without encryption we stream parts
 	// directly to save disk space.
+	// Stream parts to gigafile.nu, encrypting on the fly if enabled.
+	// Part temp files are cleaned up after the upload reads them.
 	var (
 		result    *gigafile.UploadResult
 		uploadErr error
 	)
 	if b.encKey != nil {
-		var encTmp *os.File
-		var encSize int64
-		encTmp, encSize, uploadErr = encryptToFile(b.encKey, io.MultiReader(readers...), b.tempDir)
-		b.cleanupUpload(mpu)
-		if uploadErr != nil {
-			return "", "", fmt.Errorf("encrypt: %w", uploadErr)
+		se, err := newStreamEncryptor(b.encKey, io.MultiReader(readers...))
+		if err != nil {
+			b.cleanupUpload(mpu)
+			return "", "", fmt.Errorf("encrypt: %w", err)
 		}
-		defer os.Remove(encTmp.Name())
-		defer encTmp.Close()
-		result, uploadErr = b.gf.Upload(object, encSize, encTmp)
+		result, uploadErr = b.gf.Upload(object, calcCiphertextSize(totalSize), se)
+		b.cleanupUpload(mpu)
 	} else {
 		result, uploadErr = b.gf.Upload(object, totalSize, io.MultiReader(readers...))
 		b.cleanupUpload(mpu)
