@@ -61,8 +61,64 @@ func (d *DB) migrate() error {
 			PRIMARY KEY (bucket, key)
 		);
 		CREATE INDEX IF NOT EXISTS idx_expiry ON objects (expiry_time) WHERE deleted_at IS NULL;
+		CREATE TABLE IF NOT EXISTS buckets (
+			name       TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL
+		);
 	`)
 	return err
+}
+
+// CreateBucket inserts a bucket record; returns false if it already exists.
+func (d *DB) CreateBucket(name string, createdAt time.Time) (bool, error) {
+	res, err := d.conn.Exec(
+		`INSERT OR IGNORE INTO buckets (name, created_at) VALUES (?, ?)`,
+		name, createdAt.Unix(),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// DeleteBucket removes a bucket record.
+func (d *DB) DeleteBucket(name string) error {
+	_, err := d.conn.Exec(`DELETE FROM buckets WHERE name = ?`, name)
+	return err
+}
+
+// BucketExists reports whether a bucket exists.
+func (d *DB) BucketExists(name string) (bool, error) {
+	var exists bool
+	err := d.conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM buckets WHERE name = ?)`, name).Scan(&exists)
+	return exists, err
+}
+
+// Bucket represents a stored bucket record.
+type Bucket struct {
+	Name      string
+	CreatedAt time.Time
+}
+
+// ListBuckets returns all buckets.
+func (d *DB) ListBuckets() ([]Bucket, error) {
+	rows, err := d.conn.Query(`SELECT name, created_at FROM buckets ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var buckets []Bucket
+	for rows.Next() {
+		var b Bucket
+		var createdUnix int64
+		if err := rows.Scan(&b.Name, &createdUnix); err != nil {
+			return nil, err
+		}
+		b.CreatedAt = time.Unix(createdUnix, 0)
+		buckets = append(buckets, b)
+	}
+	return buckets, rows.Err()
 }
 
 // Close closes the database connection

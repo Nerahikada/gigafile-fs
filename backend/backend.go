@@ -25,8 +25,6 @@ type Backend struct {
 	db      *db.DB
 	gf      *gigafile.Client
 	tempDir string
-	mu      sync.RWMutex
-	buckets map[string]time.Time // bucket name → creation time
 
 	// multipart upload tracking
 	uploads   map[gofakes3.UploadID]*mpUpload
@@ -40,7 +38,6 @@ func New(database *db.DB, tempDir string) *Backend {
 		db:      database,
 		gf:      gigafile.New(),
 		tempDir: tempDir,
-		buckets: make(map[string]time.Time),
 		uploads: make(map[gofakes3.UploadID]*mpUpload),
 	}
 }
@@ -48,39 +45,41 @@ func New(database *db.DB, tempDir string) *Backend {
 // ---------- bucket operations ----------
 
 func (b *Backend) ListBuckets() ([]gofakes3.BucketInfo, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]gofakes3.BucketInfo, 0, len(b.buckets))
-	for name, created := range b.buckets {
+	buckets, err := b.db.ListBuckets()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gofakes3.BucketInfo, 0, len(buckets))
+	for _, bkt := range buckets {
 		out = append(out, gofakes3.BucketInfo{
-			Name:         name,
-			CreationDate: gofakes3.NewContentTime(created),
+			Name:         bkt.Name,
+			CreationDate: gofakes3.NewContentTime(bkt.CreatedAt),
 		})
 	}
 	return out, nil
 }
 
 func (b *Backend) BucketExists(name string) (bool, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	_, ok := b.buckets[name]
-	return ok, nil
+	return b.db.BucketExists(name)
 }
 
 func (b *Backend) CreateBucket(name string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.buckets[name]; ok {
+	created, err := b.db.CreateBucket(name, time.Now())
+	if err != nil {
+		return err
+	}
+	if !created {
 		return gofakes3.ResourceError(gofakes3.ErrBucketAlreadyExists, name)
 	}
-	b.buckets[name] = time.Now()
 	return nil
 }
 
 func (b *Backend) DeleteBucket(name string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.buckets[name]; !ok {
+	exists, err := b.db.BucketExists(name)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return gofakes3.BucketNotFound(name)
 	}
 	objects, err := b.db.List(name, "")
@@ -90,24 +89,19 @@ func (b *Backend) DeleteBucket(name string) error {
 	if len(objects) > 0 {
 		return gofakes3.ResourceError(gofakes3.ErrBucketNotEmpty, name)
 	}
-	delete(b.buckets, name)
-	return nil
+	return b.db.DeleteBucket(name)
 }
 
 func (b *Backend) ForceDeleteBucket(name string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.buckets, name)
-	return nil
+	return b.db.DeleteBucket(name)
 }
 
 // ---------- object list ----------
 
 func (b *Backend) ListBucket(name string, prefix *gofakes3.Prefix, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
-	b.mu.RLock()
-	_, ok := b.buckets[name]
-	b.mu.RUnlock()
-	if !ok {
+	if ok, err := b.db.BucketExists(name); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, gofakes3.BucketNotFound(name)
 	}
 
@@ -153,10 +147,9 @@ func (b *Backend) ListBucket(name string, prefix *gofakes3.Prefix, page gofakes3
 // ---------- HeadObject ----------
 
 func (b *Backend) HeadObject(bucketName, objectName string) (*gofakes3.Object, error) {
-	b.mu.RLock()
-	_, ok := b.buckets[bucketName]
-	b.mu.RUnlock()
-	if !ok {
+	if ok, err := b.db.BucketExists(bucketName); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, gofakes3.BucketNotFound(bucketName)
 	}
 
@@ -181,10 +174,9 @@ func (b *Backend) HeadObject(bucketName, objectName string) (*gofakes3.Object, e
 // ---------- GetObject ----------
 
 func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
-	b.mu.RLock()
-	_, ok := b.buckets[bucketName]
-	b.mu.RUnlock()
-	if !ok {
+	if ok, err := b.db.BucketExists(bucketName); err != nil {
+		return nil, err
+	} else if !ok {
 		return nil, gofakes3.BucketNotFound(bucketName)
 	}
 
@@ -235,10 +227,9 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 // ---------- PutObject ----------
 
 func (b *Backend) PutObject(bucketName, key string, meta map[string]string, input io.Reader, size int64, conditions *gofakes3.PutConditions) (gofakes3.PutObjectResult, error) {
-	b.mu.RLock()
-	_, ok := b.buckets[bucketName]
-	b.mu.RUnlock()
-	if !ok {
+	if ok, err := b.db.BucketExists(bucketName); err != nil {
+		return gofakes3.PutObjectResult{}, err
+	} else if !ok {
 		return gofakes3.PutObjectResult{}, gofakes3.BucketNotFound(bucketName)
 	}
 
@@ -314,10 +305,9 @@ func (b *Backend) PutObject(bucketName, key string, meta map[string]string, inpu
 // ---------- DeleteObject ----------
 
 func (b *Backend) DeleteObject(bucketName, objectName string) (gofakes3.ObjectDeleteResult, error) {
-	b.mu.RLock()
-	_, ok := b.buckets[bucketName]
-	b.mu.RUnlock()
-	if !ok {
+	if ok, err := b.db.BucketExists(bucketName); err != nil {
+		return gofakes3.ObjectDeleteResult{}, err
+	} else if !ok {
 		return gofakes3.ObjectDeleteResult{}, gofakes3.BucketNotFound(bucketName)
 	}
 	obj, err := b.db.Get(bucketName, objectName)
@@ -440,9 +430,7 @@ func (b *Backend) renewObject(obj db.Object) error {
 
 // EnsureBucket creates a bucket if it doesn't already exist (idempotent).
 func (b *Backend) EnsureBucket(name string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.buckets[name]; !ok {
-		b.buckets[name] = time.Now()
+	if _, err := b.db.CreateBucket(name, time.Now()); err != nil {
+		log.Printf("EnsureBucket %q: %v", name, err)
 	}
 }
