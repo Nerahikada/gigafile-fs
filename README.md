@@ -10,6 +10,7 @@ Translates AWS S3 API calls into gigafile.nu HTTP API requests and persists meta
 
 - PutObject, GetObject, HeadObject, DeleteObject, ListBucket, Multipart Upload
 - 100 MB chunked upload; Range request forwarding
+- AES-256-GCM client-side encryption (optional)
 - Files auto-renewed 14 days before the 100-day gigafile.nu expiry
 
 ## Build
@@ -30,6 +31,7 @@ docker build -t gigafile-fs .
 | `GIGAFILE_DB_PATH` | `gigafile.db` | SQLite database path |
 | `GIGAFILE_TEMP_DIR` | `/tmp` | Temporary directory for multipart parts |
 | `GIGAFILE_BUCKET` | *(empty)* | Bucket to create automatically on startup |
+| `GIGAFILE_ENCRYPTION_KEY` | *(empty)* | Passphrase for AES-256-GCM client-side encryption (SHA-256 stretched to 32 bytes); disabled if unset |
 
 ## Known limitations
 
