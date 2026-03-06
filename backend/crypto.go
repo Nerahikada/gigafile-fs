@@ -101,10 +101,23 @@ func encryptToFile(key []byte, r io.Reader, tempDir string) (*os.File, int64, er
 	return tmp, written, nil
 }
 
-// decryptToFile reads the encrypted file format from r and writes decrypted
-// plaintext to a new temp file. Returns the temp file (seeked to start).
-// Caller must close and remove the file.
-func decryptToFile(key []byte, r io.Reader, tempDir string) (*os.File, error) {
+// streamDecryptor decrypts an AES-256-GCM chunked ciphertext stream on the fly.
+// Each 32 MB chunk is verified and decrypted as it arrives, so the caller
+// receives plaintext immediately instead of waiting for the full download.
+// It implements io.ReadCloser; closing it closes the underlying source.
+type streamDecryptor struct {
+	gcm       cipher.AEAD
+	src       io.ReadCloser
+	chunkSize int
+	nonce     []byte
+	ctBuf     []byte
+	plain     []byte // buffered plaintext from the most recently decrypted chunk
+	done      bool
+}
+
+// newStreamDecryptor reads and validates the GFSE header from src, then returns
+// a streaming decryptor. src is owned by the returned decryptor.
+func newStreamDecryptor(key []byte, src io.ReadCloser) (*streamDecryptor, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("aes: %w", err)
@@ -114,9 +127,8 @@ func decryptToFile(key []byte, r io.Reader, tempDir string) (*os.File, error) {
 		return nil, fmt.Errorf("gcm: %w", err)
 	}
 
-	// Read and validate header
 	var header [encHeaderSize]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
+	if _, err := io.ReadFull(src, header[:]); err != nil {
 		return nil, fmt.Errorf("read header: %w", err)
 	}
 	if [4]byte(header[:4]) != encMagic {
@@ -127,75 +139,64 @@ func decryptToFile(key []byte, r io.Reader, tempDir string) (*os.File, error) {
 	}
 	chunkSize := int(binary.BigEndian.Uint32(header[5:9]))
 
-	tmp, err := os.CreateTemp(tempDir, "gigafile-dec-*")
-	if err != nil {
-		return nil, fmt.Errorf("create decrypted temp: %w", err)
-	}
-
-	nonce := make([]byte, gcmNonceSize)
-	ctBuf := make([]byte, chunkSize+gcmTagSize)
-
-	for {
-		// Read nonce — EOF here means we finished all chunks cleanly.
-		if _, err := io.ReadFull(r, nonce); err == io.EOF {
-			break
-		} else if err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, fmt.Errorf("read nonce: %w", err)
-		}
-
-		// Read ciphertext+tag for this chunk.
-		n, readErr := io.ReadFull(r, ctBuf)
-		if n == 0 {
-			if readErr == io.EOF {
-				break
-			}
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, fmt.Errorf("read ciphertext: %w", readErr)
-		}
-
-		plaintext, err := gcm.Open(nil, nonce, ctBuf[:n], nil)
-		if err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, fmt.Errorf("decrypt chunk: %w", err)
-		}
-		if _, err := tmp.Write(plaintext); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, err
-		}
-
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-		if readErr != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			return nil, fmt.Errorf("read ciphertext: %w", readErr)
-		}
-	}
-
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, err
-	}
-	return tmp, nil
+	return &streamDecryptor{
+		gcm:       gcm,
+		src:       src,
+		chunkSize: chunkSize,
+		nonce:     make([]byte, gcmNonceSize),
+		ctBuf:     make([]byte, chunkSize+gcmTagSize),
+	}, nil
 }
 
-// tempFileBody is an io.ReadCloser backed by a temp file that removes the file on Close.
-type tempFileBody struct {
-	file   *os.File
+func (d *streamDecryptor) Read(p []byte) (int, error) {
+	for {
+		if len(d.plain) > 0 {
+			n := copy(p, d.plain)
+			d.plain = d.plain[n:]
+			return n, nil
+		}
+		if d.done {
+			return 0, io.EOF
+		}
+		if err := d.nextChunk(); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (d *streamDecryptor) nextChunk() error {
+	if _, err := io.ReadFull(d.src, d.nonce); err == io.EOF {
+		d.done = true
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("read nonce: %w", err)
+	}
+
+	n, readErr := io.ReadFull(d.src, d.ctBuf)
+	if n == 0 {
+		d.done = true
+		return nil
+	}
+
+	plain, err := d.gcm.Open(nil, d.nonce, d.ctBuf[:n], nil)
+	if err != nil {
+		return fmt.Errorf("decrypt chunk: %w", err)
+	}
+	d.plain = plain
+
+	if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+		d.done = true
+	}
+	return nil
+}
+
+func (d *streamDecryptor) Close() error { return d.src.Close() }
+
+// closerWithReader pairs an io.Closer with a (possibly wrapped) io.Reader.
+// Used when the close target and the read source differ, e.g. LimitReader over a stream.
+type closerWithReader struct {
+	io.Closer
 	reader io.Reader
 }
 
-func (t *tempFileBody) Read(p []byte) (int, error) { return t.reader.Read(p) }
-func (t *tempFileBody) Close() error {
-	name := t.file.Name()
-	err := t.file.Close()
-	os.Remove(name)
-	return err
-}
+func (c *closerWithReader) Read(p []byte) (int, error) { return c.reader.Read(p) }

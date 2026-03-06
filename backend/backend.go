@@ -194,46 +194,38 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 	hash, _ := hex.DecodeString(strings.Trim(obj.ETag, `"`))
 
 	if b.encKey != nil {
-		// Encrypted path: download full ciphertext, decrypt, then apply range.
-		ctTmp, err := os.CreateTemp(b.tempDir, "gigafile-ct-*")
+		// Encrypted path: stream ciphertext from gigafile.nu and decrypt on the fly.
+		// Each 32 MB chunk is verified and decrypted as it arrives; the caller
+		// receives plaintext immediately without waiting for the full download.
+		resp, err := b.gf.DownloadResponse(obj.GigafileDomain, obj.FileID, "")
 		if err != nil {
-			return nil, fmt.Errorf("create ciphertext temp: %w", err)
-		}
-		if err := b.gf.Download(obj.GigafileDomain, obj.FileID, ctTmp, ""); err != nil {
-			ctTmp.Close()
-			os.Remove(ctTmp.Name())
 			return nil, fmt.Errorf("gigafile download: %w", err)
 		}
-		if _, err := ctTmp.Seek(0, io.SeekStart); err != nil {
-			ctTmp.Close()
-			os.Remove(ctTmp.Name())
-			return nil, err
-		}
 
-		ptTmp, err := decryptToFile(b.encKey, ctTmp, b.tempDir)
-		ctTmp.Close()
-		os.Remove(ctTmp.Name())
+		sd, err := newStreamDecryptor(b.encKey, resp.Body)
 		if err != nil {
+			resp.Body.Close()
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
 
 		size := obj.Size
 		var rng *gofakes3.ObjectRange
-		var reader io.Reader = ptTmp
+		var contents io.ReadCloser = sd
 		if rangeRequest != nil {
 			rng, err = rangeRequest.Range(obj.Size)
 			if err != nil {
-				ptTmp.Close()
-				os.Remove(ptTmp.Name())
+				sd.Close()
 				return nil, err
 			}
 			if rng != nil {
-				if _, err := ptTmp.Seek(rng.Start, io.SeekStart); err != nil {
-					ptTmp.Close()
-					os.Remove(ptTmp.Name())
-					return nil, err
+				// Skip leading plaintext to reach the range start.
+				// Since the stream is sequential we read and discard; the
+				// chunk boundary alignment makes this at most one extra chunk.
+				if _, err := io.CopyN(io.Discard, sd, rng.Start); err != nil && err != io.EOF {
+					sd.Close()
+					return nil, fmt.Errorf("skip to range start: %w", err)
 				}
-				reader = io.LimitReader(ptTmp, rng.Length)
+				contents = &closerWithReader{sd, io.LimitReader(sd, rng.Length)}
 				size = rng.Length
 			}
 		}
@@ -243,7 +235,7 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 			Hash:     hash,
 			Metadata: map[string]string{"content-type": obj.ContentType},
 			Size:     size,
-			Contents: &tempFileBody{file: ptTmp, reader: reader},
+			Contents: contents,
 			Range:    rng,
 		}, nil
 	}
