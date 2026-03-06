@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/textproto"
+	"net/url"
 	"regexp"
 	"strconv"
 
@@ -29,6 +30,62 @@ type UploadResult struct {
 	URL    string // e.g. https://66.gigafile.nu/0320-xxxx
 	FileID string // e.g. 0320-xxxx
 	Domain string // e.g. 66.gigafile.nu
+	DelKey string // 4-char alphanumeric deletion key (e.g. "ac41"); see DeleteFile
+}
+
+// DeleteFile deletes a file on gigafile.nu using its deletion key.
+//
+// # Endpoint (confirmed from download.js source)
+//
+//	GET https://{domain}/remove.php?file={fileID}&delkey={delKey}
+//
+// Note: the query parameter is named "file", not "key".
+// The method is GET (jQuery ajax type:"GET"), not POST.
+//
+// The delkey is the 4-character alphanumeric string ([0-9a-zA-Z]{4}) returned by
+// upload_chunk.php in the final chunk response (e.g. "ac41"). It is also used for set_dlkey.php:
+//
+//	GET https://{server}/set_dlkey.php?file={fileID}&delkey={delKey}&dlkey={newDlPassword}
+//
+// Response JSON: {"status": 0} = success, {"status": 1} = failure (wrong key / file not found).
+//
+// Security note: the delkey is server-generated (callers cannot choose it) and
+// is a 4-character alphanumeric string ([0-9a-zA-Z]{4}); server-generated samples
+// were all lowercase hex (0-9, a-f), giving 65,536 (16^4) combinations, but the
+// client-side validation accepts up to 62^4 ≈ 14.7M combinations.
+// Regardless of exact character set, anyone who knows the file URL can brute-force
+// the delkey and
+// delete the file in seconds. There is no client-side mitigation possible.
+// For files that should persist, rely on the 100-day natural expiry and
+// auto-renewal rather than assuming the file cannot be externally deleted.
+func (c *Client) DeleteFile(domain, fileID, delKey string) error {
+	// Confirmed from download.js remove_file():
+	//   $.ajax({ type:"GET", url:"./remove.php", data:{file:..., delkey:...} })
+	// Note: parameter name is "file", not "key".
+	endpoint := fmt.Sprintf("https://%s/remove.php?file=%s&delkey=%s",
+		domain, url.QueryEscape(fileID), url.QueryEscape(delKey))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Referer", fmt.Sprintf("https://%s/%s", domain, fileID))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("remove.php: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Status int `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("remove.php: decode response: %w", err)
+	}
+	if result.Status != 0 {
+		return fmt.Errorf("remove.php: server returned status %d (wrong delkey or file not found)", result.Status)
+	}
+	return nil
 }
 
 // Client is a gigafile.nu HTTP client
@@ -109,6 +166,7 @@ type chunkResponse struct {
 	Status   int    `json:"status"`
 	URL      string `json:"url"`
 	Filename string `json:"filename"`
+	DelKey   string `json:"delkey"` // 4-char alphanumeric [0-9a-zA-Z]; only present in the final chunk response
 }
 
 func (c *Client) uploadChunk(server, token, filename string, chunkNo, totalChunks int, data []byte) (*UploadResult, error) {
@@ -170,6 +228,7 @@ func (c *Client) uploadChunk(server, token, filename string, chunkNo, totalChunk
 		URL:    cr.URL,
 		FileID: cr.Filename,
 		Domain: domain,
+		DelKey: cr.DelKey,
 	}, nil
 }
 

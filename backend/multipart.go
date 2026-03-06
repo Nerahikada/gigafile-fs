@@ -285,6 +285,7 @@ func (b *Backend) CompleteMultipartUpload(bucket, object string, id gofakes3.Upl
 		GigafileURL:    result.URL,
 		FileID:         result.FileID,
 		GigafileDomain: result.Domain,
+		DelKey:         result.DelKey,
 		UploadTime:     now,
 		ExpiryTime:     now.Add(100 * 24 * time.Hour),
 		Size:           totalSize,

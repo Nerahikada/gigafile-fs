@@ -9,17 +9,18 @@ import (
 
 // Object represents a stored S3 object backed by gigafile.nu
 type Object struct {
-	Bucket        string
-	Key           string
-	GigafileURL   string
-	FileID        string
+	Bucket         string
+	Key            string
+	GigafileURL    string
+	FileID         string
 	GigafileDomain string
-	UploadTime    time.Time
-	ExpiryTime    time.Time
-	Size          int64
-	ContentType   string
-	ETag          string
-	DeletedAt     *time.Time
+	DelKey         string // deletion key from upload response; see gigafile.Client.DeleteFile
+	UploadTime     time.Time
+	ExpiryTime     time.Time
+	Size           int64
+	ContentType    string
+	ETag           string
+	DeletedAt      *time.Time
 }
 
 // DB wraps sqlite connection
@@ -50,6 +51,7 @@ func (d *DB) migrate() error {
 			gigafile_url    TEXT NOT NULL,
 			file_id         TEXT NOT NULL,
 			gigafile_domain TEXT NOT NULL,
+			del_key         TEXT NOT NULL DEFAULT '',
 			upload_time     INTEGER NOT NULL,
 			expiry_time     INTEGER NOT NULL,
 			size            INTEGER NOT NULL,
@@ -72,10 +74,10 @@ func (d *DB) Close() error {
 func (d *DB) Put(obj Object) error {
 	_, err := d.conn.Exec(`
 		INSERT OR REPLACE INTO objects
-			(bucket, key, gigafile_url, file_id, gigafile_domain,
+			(bucket, key, gigafile_url, file_id, gigafile_domain, del_key,
 			 upload_time, expiry_time, size, content_type, etag, deleted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-		obj.Bucket, obj.Key, obj.GigafileURL, obj.FileID, obj.GigafileDomain,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+		obj.Bucket, obj.Key, obj.GigafileURL, obj.FileID, obj.GigafileDomain, obj.DelKey,
 		obj.UploadTime.Unix(), obj.ExpiryTime.Unix(),
 		obj.Size, obj.ContentType, obj.ETag,
 	)
@@ -85,7 +87,7 @@ func (d *DB) Put(obj Object) error {
 // Get retrieves a non-deleted object by bucket+key
 func (d *DB) Get(bucket, key string) (*Object, error) {
 	row := d.conn.QueryRow(`
-		SELECT bucket, key, gigafile_url, file_id, gigafile_domain,
+		SELECT bucket, key, gigafile_url, file_id, gigafile_domain, del_key,
 		       upload_time, expiry_time, size, content_type, etag
 		FROM objects
 		WHERE bucket = ? AND key = ? AND deleted_at IS NULL`,
@@ -106,7 +108,7 @@ func (d *DB) SoftDelete(bucket, key string) error {
 // List returns all non-deleted objects in a bucket with key >= prefix
 func (d *DB) List(bucket, prefix string) ([]Object, error) {
 	rows, err := d.conn.Query(`
-		SELECT bucket, key, gigafile_url, file_id, gigafile_domain,
+		SELECT bucket, key, gigafile_url, file_id, gigafile_domain, del_key,
 		       upload_time, expiry_time, size, content_type, etag
 		FROM objects
 		WHERE bucket = ? AND key LIKE ? AND deleted_at IS NULL
@@ -133,7 +135,7 @@ func (d *DB) List(bucket, prefix string) ([]Object, error) {
 func (d *DB) ListExpiringSoon(within time.Duration) ([]Object, error) {
 	threshold := time.Now().Add(within).Unix()
 	rows, err := d.conn.Query(`
-		SELECT bucket, key, gigafile_url, file_id, gigafile_domain,
+		SELECT bucket, key, gigafile_url, file_id, gigafile_domain, del_key,
 		       upload_time, expiry_time, size, content_type, etag
 		FROM objects
 		WHERE deleted_at IS NULL AND expiry_time <= ?
@@ -165,7 +167,7 @@ func scanObject(s scanner) (*Object, error) {
 	var uploadUnix, expiryUnix int64
 	err := s.Scan(
 		&obj.Bucket, &obj.Key,
-		&obj.GigafileURL, &obj.FileID, &obj.GigafileDomain,
+		&obj.GigafileURL, &obj.FileID, &obj.GigafileDomain, &obj.DelKey,
 		&uploadUnix, &expiryUnix,
 		&obj.Size, &obj.ContentType, &obj.ETag,
 	)
