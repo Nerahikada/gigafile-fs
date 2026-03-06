@@ -204,7 +204,7 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 
 		sd, err := newStreamDecryptor(b.encKey, resp.Body)
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("decrypt: %w", err)
 		}
 

@@ -305,7 +305,7 @@ func (c *Client) DownloadResponse(domain, fileID string, rangeHeader string) (*h
 		return nil, fmt.Errorf("download: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 	return resp, nil
