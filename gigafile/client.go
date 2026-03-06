@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/textproto"
 	"net/url"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -96,8 +98,21 @@ type Client struct {
 // New creates a new Client
 func New() *Client {
 	jar, _ := cookiejar.New(nil)
+	// Use transport-level timeouts only.
+	// http.Client.Timeout is intentionally unset because DownloadResponse returns
+	// a streaming body that the caller reads — a client-level timeout would kill
+	// the download mid-transfer. Transport timeouts cover the connection and
+	// response-header phases without affecting body streaming.
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	}
 	return &Client{
-		http: &http.Client{Jar: jar},
+		http: &http.Client{Jar: jar, Transport: transport},
 	}
 }
 

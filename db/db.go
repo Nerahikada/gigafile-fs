@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -161,15 +162,22 @@ func (d *DB) SoftDelete(bucket, key string) error {
 	return err
 }
 
-// List returns all non-deleted objects in a bucket with key >= prefix
+// likePrefixEscape escapes LIKE special characters in prefix so that only the
+// trailing wildcard (%) has special meaning. Without this, a prefix containing
+// '%' or '_' would unintentionally match extra keys.
+func likePrefixEscape(prefix string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+}
+
+// List returns all non-deleted objects in a bucket whose key starts with prefix.
 func (d *DB) List(bucket, prefix string) ([]Object, error) {
 	rows, err := d.conn.Query(`
 		SELECT bucket, key, gigafile_url, file_id, gigafile_domain, del_key,
 		       upload_time, expiry_time, size, content_type, etag
 		FROM objects
-		WHERE bucket = ? AND key LIKE ? AND deleted_at IS NULL
+		WHERE bucket = ? AND key LIKE ? ESCAPE '\' AND deleted_at IS NULL
 		ORDER BY key`,
-		bucket, prefix+"%",
+		bucket, likePrefixEscape(prefix)+"%",
 	)
 	if err != nil {
 		return nil, err

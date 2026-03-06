@@ -11,6 +11,14 @@ import (
 	"github.com/Nerahikada/gigafile-fs/db"
 )
 
+const (
+	// readHeaderTimeout limits how long we wait for HTTP request headers.
+	// Large uploads/downloads are unaffected because this only covers headers.
+	readHeaderTimeout = 10 * time.Second
+	// maxHeaderBytes caps the size of incoming HTTP headers.
+	maxHeaderBytes = 1 << 20 // 1 MiB
+)
+
 func main() {
 	cfg := loadConfig()
 
@@ -56,17 +64,26 @@ func main() {
 	log.Printf("  renewal    : %s before expiry", cfg.RenewalWindow)
 
 	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: withAuth(cfg, faker.Server()),
+		Addr:              cfg.Listen,
+		Handler:           withAuth(cfg, faker.Server()),
+		ReadHeaderTimeout: readHeaderTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 }
 
-// withAuth wraps an http.Handler with simple AWS Signature V4 key/secret validation.
-// It only checks the access key ID present in the Authorization header.
-// For production use, implement full SigV4 verification.
+// withAuth wraps an http.Handler with access-key-ID validation.
+// It checks the access key ID in the Authorization header (SigV4) or
+// the X-Amz-Credential query parameter (presigned URLs).
+// Requests without any credential are rejected.
+//
+// Note: HMAC signature verification is intentionally omitted. This server is
+// designed to run inside a private Docker network or behind a localhost-bound
+// reverse proxy (e.g. cloudflared), where network isolation provides the
+// primary security boundary. The access key check prevents accidental
+// misconfiguration from exposing the endpoint to other containers.
 func withAuth(cfg Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cfg.AccessKey != "" {
@@ -81,10 +98,8 @@ func withAuth(cfg Config, next http.Handler) http.Handler {
 				// presigned URL: Credential=KEY/...
 				keyPresent = len(keyFromQuery) >= len(cfg.AccessKey) &&
 					keyFromQuery[:len(cfg.AccessKey)] == cfg.AccessKey
-			} else {
-				// No auth header - allow anonymous for health checks
-				keyPresent = true
 			}
+			// No credential at all → deny.
 
 			if !keyPresent {
 				http.Error(w, "Forbidden", http.StatusForbidden)
