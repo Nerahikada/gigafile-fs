@@ -17,6 +17,7 @@
 !README.md
 !LICENSE
 !Dockerfile
+!.github/workflows/*.yml
 
 # !Makefile
 
