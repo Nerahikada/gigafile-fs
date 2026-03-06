@@ -32,7 +32,12 @@ func main() {
 	}
 	defer database.Close()
 
-	be := backend.New(database, cfg.TempDir)
+	be := backend.New(database, cfg.TempDir, cfg.EncryptionKey)
+	if cfg.EncryptionKey != nil {
+		log.Println("encryption: enabled (AES-256-GCM)")
+	} else {
+		log.Println("encryption: disabled")
+	}
 
 	// Ensure the default bucket exists on startup
 	if cfg.DefaultBucket != "" {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/johannesboyne/gofakes3"
 	"github.com/Nerahikada/gigafile-fs/db"
+	"github.com/Nerahikada/gigafile-fs/gigafile"
 )
 
 // mpPart is one upload part stored as a temp file on disk.
@@ -266,11 +267,31 @@ func (b *Backend) CompleteMultipartUpload(bucket, object string, id gofakes3.Upl
 	meta := mpu.meta
 	mpu.mu.Unlock()
 
-	// Stream all parts directly from disk to gigafile.nu.
-	result, err := b.gf.Upload(object, totalSize, io.MultiReader(readers...))
-	b.cleanupUpload(mpu)
-	if err != nil {
-		return "", "", fmt.Errorf("gigafile upload: %w", err)
+	// Assemble and upload to gigafile.nu.
+	// With encryption the plaintext must be fully assembled first so it can be
+	// encrypted chunk-by-chunk before upload. Without encryption we stream parts
+	// directly to save disk space.
+	var (
+		result    *gigafile.UploadResult
+		uploadErr error
+	)
+	if b.encKey != nil {
+		var encTmp *os.File
+		var encSize int64
+		encTmp, encSize, uploadErr = encryptToFile(b.encKey, io.MultiReader(readers...), b.tempDir)
+		b.cleanupUpload(mpu)
+		if uploadErr != nil {
+			return "", "", fmt.Errorf("encrypt: %w", uploadErr)
+		}
+		defer os.Remove(encTmp.Name())
+		defer encTmp.Close()
+		result, uploadErr = b.gf.Upload(object, encSize, encTmp)
+	} else {
+		result, uploadErr = b.gf.Upload(object, totalSize, io.MultiReader(readers...))
+		b.cleanupUpload(mpu)
+	}
+	if uploadErr != nil {
+		return "", "", fmt.Errorf("gigafile upload: %w", uploadErr)
 	}
 
 	contentType := "application/octet-stream"

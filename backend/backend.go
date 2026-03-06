@@ -25,6 +25,7 @@ type Backend struct {
 	db      *db.DB
 	gf      *gigafile.Client
 	tempDir string
+	encKey  []byte // AES-256 key; nil means encryption disabled
 
 	// multipart upload tracking
 	uploads   map[gofakes3.UploadID]*mpUpload
@@ -32,12 +33,14 @@ type Backend struct {
 	nextID    uint64 // atomically incremented to generate upload IDs
 }
 
-// New creates a Backend using the given database and temp directory.
-func New(database *db.DB, tempDir string) *Backend {
+// New creates a Backend using the given database, temp directory, and optional
+// encryption key. Pass nil for encKey to disable encryption.
+func New(database *db.DB, tempDir string, encKey []byte) *Backend {
 	return &Backend{
 		db:      database,
 		gf:      gigafile.New(),
 		tempDir: tempDir,
+		encKey:  encKey,
 		uploads: make(map[gofakes3.UploadID]*mpUpload),
 	}
 }
@@ -188,6 +191,64 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 		return nil, gofakes3.KeyNotFound(objectName)
 	}
 
+	hash, _ := hex.DecodeString(strings.Trim(obj.ETag, `"`))
+
+	if b.encKey != nil {
+		// Encrypted path: download full ciphertext, decrypt, then apply range.
+		ctTmp, err := os.CreateTemp(b.tempDir, "gigafile-ct-*")
+		if err != nil {
+			return nil, fmt.Errorf("create ciphertext temp: %w", err)
+		}
+		if err := b.gf.Download(obj.GigafileDomain, obj.FileID, ctTmp, ""); err != nil {
+			ctTmp.Close()
+			os.Remove(ctTmp.Name())
+			return nil, fmt.Errorf("gigafile download: %w", err)
+		}
+		if _, err := ctTmp.Seek(0, io.SeekStart); err != nil {
+			ctTmp.Close()
+			os.Remove(ctTmp.Name())
+			return nil, err
+		}
+
+		ptTmp, err := decryptToFile(b.encKey, ctTmp, b.tempDir)
+		ctTmp.Close()
+		os.Remove(ctTmp.Name())
+		if err != nil {
+			return nil, fmt.Errorf("decrypt: %w", err)
+		}
+
+		size := obj.Size
+		var rng *gofakes3.ObjectRange
+		var reader io.Reader = ptTmp
+		if rangeRequest != nil {
+			rng, err = rangeRequest.Range(obj.Size)
+			if err != nil {
+				ptTmp.Close()
+				os.Remove(ptTmp.Name())
+				return nil, err
+			}
+			if rng != nil {
+				if _, err := ptTmp.Seek(rng.Start, io.SeekStart); err != nil {
+					ptTmp.Close()
+					os.Remove(ptTmp.Name())
+					return nil, err
+				}
+				reader = io.LimitReader(ptTmp, rng.Length)
+				size = rng.Length
+			}
+		}
+
+		return &gofakes3.Object{
+			Name:     objectName,
+			Hash:     hash,
+			Metadata: map[string]string{"content-type": obj.ContentType},
+			Size:     size,
+			Contents: &tempFileBody{file: ptTmp, reader: reader},
+			Range:    rng,
+		}, nil
+	}
+
+	// Unencrypted path: stream directly from gigafile.nu (supports Range header).
 	rangeHeader := ""
 	if rangeRequest != nil {
 		r, err := rangeRequest.Range(obj.Size)
@@ -213,7 +274,6 @@ func (b *Backend) GetObject(bucketName, objectName string, rangeRequest *gofakes
 		}
 	}
 
-	hash, _ := hex.DecodeString(strings.Trim(obj.ETag, `"`))
 	return &gofakes3.Object{
 		Name:     objectName,
 		Hash:     hash,
@@ -276,7 +336,22 @@ func (b *Backend) PutObject(bucketName, key string, meta map[string]string, inpu
 		contentType = ct
 	}
 
-	result, err := b.gf.Upload(key, size, tmp)
+	// uploadReader is what we actually send to gigafile.nu.
+	// With encryption it is the ciphertext temp file; without it is the plaintext temp file.
+	uploadReader := io.ReadSeeker(tmp)
+	uploadSize := size
+	if b.encKey != nil {
+		encTmp, encSize, err := encryptToFile(b.encKey, tmp, b.tempDir)
+		if err != nil {
+			return gofakes3.PutObjectResult{}, fmt.Errorf("encrypt: %w", err)
+		}
+		defer os.Remove(encTmp.Name())
+		defer encTmp.Close()
+		uploadReader = encTmp
+		uploadSize = encSize
+	}
+
+	result, err := b.gf.Upload(key, uploadSize, uploadReader)
 	if err != nil {
 		return gofakes3.PutObjectResult{}, fmt.Errorf("gigafile upload: %w", err)
 	}
